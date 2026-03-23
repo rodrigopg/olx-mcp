@@ -14,44 +14,47 @@ This is an **MCP (Model Context Protocol) server** that provides tools for searc
 
 ```
 olx-mcp/
-├── olx_mcp_server.py   # Entire application — all code lives here
-└── requirements.txt    # Python dependencies
+├── server.py           # Entire application — all code lives here
+├── requirements.txt    # Python dependencies
+└── .venv/              # Virtualenv (created locally, not committed)
 ```
 
 This is a single-file project. Do not create unnecessary new files.
 
 ---
 
-## Dependencies
+## Setup
 
-```
-mcp>=1.0.0          # Model Context Protocol SDK (provides FastMCP)
-httpx[http2]>=0.27.0 # Async HTTP client — HTTP/2 is REQUIRED (OLX returns 403 on HTTP/1.1)
-pydantic>=2.0.0     # Input validation via BaseModel
-```
-
-Install with:
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
-
-> **Critical:** Always install `httpx[http2]` (with the `[http2]` extra), not plain `httpx`. OLX enforces HTTP/2 and will return 403 otherwise.
-
----
 
 ## Running the Server
 
 ```bash
-python olx_mcp_server.py
+.venv/bin/python server.py
 ```
 
 The server runs via stdio transport (default for MCP). To integrate with an MCP-compatible client (e.g., Claude Desktop), configure the client to spawn this process.
 
 ---
 
+## Dependencies
+
+```
+mcp>=1.0.0           # Model Context Protocol SDK (provides FastMCP)
+httpx[http2]>=0.27.0 # Async HTTP client — HTTP/2 is REQUIRED (OLX returns 403 on HTTP/1.1)
+pydantic>=2.0.0      # Input validation via BaseModel
+```
+
+> **Critical:** Always install `httpx[http2]` (with the `[http2]` extra), not plain `httpx`. OLX enforces HTTP/2 and will return 403 otherwise.
+
+---
+
 ## Architecture
 
-### Code Sections (in order within `olx_mcp_server.py`)
+### Code Sections (in order within `server.py`)
 
 1. **Constants** (`BASE_URL`, `HEADERS`, `REQUEST_TIMEOUT`, `HTTP2`, `ESTADOS`)
    - Browser-mimicking headers are intentional and required for OLX to respond
@@ -167,11 +170,8 @@ annotations={
 
 ## Testing
 
-There are currently no automated tests. To manually test:
-
 ```bash
-# Run the server and send MCP JSON-RPC messages via stdin
-python olx_mcp_server.py
+.venv/bin/python -m pytest test_mcp.py -v
 ```
 
 When adding tests, use `pytest` with `pytest-asyncio` for async tool functions. Mock `httpx.AsyncClient` to avoid real HTTP calls.
