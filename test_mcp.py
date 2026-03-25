@@ -43,7 +43,7 @@ async def call_tool(proc, req_id: int, tool: str, args: dict) -> dict:
 
 async def main():
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "olx_mcp_server.py",
+        sys.executable, "-m", "olx_mcp.server",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,

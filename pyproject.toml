@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "olx-mcp"
+version = "0.1.0"
+description = "MCP server para buscar anúncios públicos da OLX Brasil"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["mcp", "olx", "brasil", "scraping", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx[http2]>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+[project.scripts]
+olx-mcp = "olx_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/rodrigopg/olx-mcp"
+Repository = "https://github.com/rodrigopg/olx-mcp"
+Issues = "https://github.com/rodrigopg/olx-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["olx_mcp"]
