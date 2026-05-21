@@ -749,9 +749,21 @@ class BuscarMLInput(BaseModel):
         default=None,
         min_length=2,
         max_length=2,
-        description="Sigla estado p/ filtrar resultados após scraping (heurística por texto).",
+        description=(
+            "AVISO: heurística best-effort. ML raramente expõe localização "
+            "nos cards de listagem, então este filtro frequentemente retorna "
+            "lista vazia mesmo quando há resultados no estado. Para resultados "
+            "confiáveis por região, use ml_buscar_anuncios sem este campo e "
+            "filtre pelo título/descrição do anúncio."
+        ),
     )
-    condicao: str | None = Field(default=None, description="'novo' ou 'usado'. Aplica filtro ITEM_CONDITION.")
+    condicao: str | None = Field(
+        default=None,
+        description=(
+            "'novo' ou 'usado'. AVISO: ML ignora o filtro via URL, então é "
+            "aplicado pós-scraping por heurística no título do anúncio."
+        ),
+    )
     pagina: int = Field(default=1, ge=1, le=20)
 
 

@@ -100,8 +100,20 @@ Busca anúncios no Mercado Livre Brasil.
 | `preco_min` | int | Não | Preço mínimo em reais |
 | `preco_max` | int | Não | Preço máximo em reais |
 | `condicao` | string | Não | `novo` \| `usado` |
-| `estado` | string | Não | Sigla UF para filtragem pós-scraping |
+| `estado` | string | Não | Sigla UF para filtragem pós-scraping (ver avisos) |
 | `pagina` | int | Não | Página (1–20, 50 itens cada) |
+
+### Diferenças entre as tools
+
+| Aspecto | OLX | Mercado Livre |
+|---|---|---|
+| Páginas máx. | 50 | 20 |
+| Ordenação | `relevance` \| `price` \| `date` | Não suportada (ML não aceita via URL pública) |
+| Filtro `condicao` | N/A | Heurística pós-scraping no título |
+| Filtro `estado` | Nativo na URL | Heurística pós-scraping (frequentemente vazio) |
+| Detalhe de anúncio | `olx_detalhe_anuncio` | Não disponível ainda ([#13](https://github.com/rodrigopg/olx-mcp/issues/13)) |
+
+Os limites de página diferem porque cada site retorna ~50 itens por página por padrão e a profundidade útil é menor no ML (resultados ficam ruins após a página 20).
 
 ## Exemplos de uso
 
