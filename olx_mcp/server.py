@@ -3,7 +3,9 @@ OLX Brasil MCP Server
 Busca anúncios públicos da OLX Brasil via scraping do __NEXT_DATA__.
 """
 
+import asyncio
 import json
+import random
 import re
 from datetime import datetime
 from typing import Optional
@@ -18,28 +20,69 @@ from pydantic import BaseModel, Field, ConfigDict
 # ---------------------------------------------------------------------------
 
 BASE_URL = "https://www.olx.com.br"
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.olx.com.br/",
-    "Cache-Control": "no-cache",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Ch-Ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"macOS"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-User": "?1",
-}
-REQUEST_TIMEOUT = 20.0
-HTTP2 = True  # Obrigatório: a OLX retorna 403 em HTTP/1.1 (requer pacote httpx[http2])
+
+# Pool de perfis de navegador para rotação anti-bloqueio
+BROWSER_PROFILES = [
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua-Platform": '"macOS"',
+        "Sec-Ch-Ua-Mobile": "?0",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua": '"Google Chrome";v="130", "Chromium";v="130", "Not?A_Brand";v="99"',
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Ch-Ua-Mobile": "?0",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+        "Sec-Ch-Ua": '"Chromium";v="129", "Not=A?Brand";v="8", "Google Chrome";v="129"',
+        "Sec-Ch-Ua-Platform": '"Linux"',
+        "Sec-Ch-Ua-Mobile": "?0",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:131.0) Gecko/20100101 Firefox/131.0",
+        "Sec-Ch-Ua": None,
+        "Sec-Ch-Ua-Platform": None,
+        "Sec-Ch-Ua-Mobile": None,
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+        "Sec-Ch-Ua": None,
+        "Sec-Ch-Ua-Platform": None,
+        "Sec-Ch-Ua-Mobile": None,
+    },
+]
+
+
+def _build_headers(profile: dict, referer: str = "https://www.google.com/", same_origin: bool = False) -> dict:
+    """Monta headers realistas a partir de um perfil de browser."""
+    h = {
+        "User-Agent": profile["User-Agent"],
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Referer": referer,
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin" if same_origin else "cross-site",
+        "Sec-Fetch-User": "?1",
+        "DNT": "1",
+        "Priority": "u=0, i",
+    }
+    if profile.get("Sec-Ch-Ua"):
+        h["Sec-Ch-Ua"] = profile["Sec-Ch-Ua"]
+        h["Sec-Ch-Ua-Platform"] = profile["Sec-Ch-Ua-Platform"]
+        h["Sec-Ch-Ua-Mobile"] = profile["Sec-Ch-Ua-Mobile"]
+    return h
+
+
+REQUEST_TIMEOUT = 25.0
+HTTP2 = True  # Obrigatório: OLX retorna 403 em HTTP/1.1
+MAX_RETRIES = 4
+WARMUP_PROBABILITY = 0.7  # chance de fazer warm-up homepage antes da busca
 
 ESTADOS = {
     "ac", "al", "ap", "am", "ba", "ce", "df", "es", "go",
@@ -143,9 +186,9 @@ def _build_search_url(params: BuscarAnunciosInput) -> str:
     # Query string
     qp: dict[str, str] = {
         "q": params.query,
-        "sf": "1",
-        "o": str(params.pagina),
     }
+    if params.pagina > 1:
+        qp["o"] = str(params.pagina)
 
     if params.ordenar == OrdenarPor.PRECO_MENOR:
         qp["sp"] = "1"
@@ -198,6 +241,153 @@ def _format_ad_summary(ad: dict) -> dict:
         "profissional": ad.get("professionalAd", False),
         "entrega_olx": ad.get("olxDelivery", {}).get("enabled", False),
         "propriedades": {p["label"]: p["value"] for p in ad.get("properties", []) if p.get("value")},
+    }
+
+
+async def _fetch_with_evasion(url: str, referer_override: Optional[str] = None) -> str:
+    """
+    GET com técnicas anti-bloqueio:
+    - Rotação de perfil de browser (UA + sec-ch-ua coerentes)
+    - Warm-up opcional na homepage para captar cookies (bm_*, ak_bmsc, etc)
+    - Retry com backoff exponencial + jitter
+    - Troca de perfil a cada falha 403/429
+    - Fallback final: Google Web Cache
+    Levanta httpx.HTTPStatusError se todas tentativas falharem.
+    """
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(MAX_RETRIES):
+        profile = random.choice(BROWSER_PROFILES)
+        cookies = httpx.Cookies()
+
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=REQUEST_TIMEOUT,
+                http2=HTTP2,
+                cookies=cookies,
+            ) as client:
+                # Warm-up: visita homepage para coletar cookies de sessão / anti-bot
+                if attempt == 0 or random.random() < WARMUP_PROBABILITY:
+                    try:
+                        warm_headers = _build_headers(profile, referer="https://www.google.com/", same_origin=False)
+                        await client.get(BASE_URL + "/", headers=warm_headers)
+                        await asyncio.sleep(random.uniform(0.4, 1.2))
+                    except Exception:
+                        pass  # warm-up best-effort
+
+                ref = referer_override or (BASE_URL + "/" if random.random() < 0.5 else "https://www.google.com/")
+                same_origin = ref.startswith(BASE_URL)
+                headers = _build_headers(profile, referer=ref, same_origin=same_origin)
+
+                resp = await client.get(url, headers=headers)
+                if resp.status_code in (403, 429):
+                    last_exc = httpx.HTTPStatusError(
+                        f"status {resp.status_code}", request=resp.request, response=resp
+                    )
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0.3, 1.5))
+                    continue
+                resp.raise_for_status()
+                return resp.text
+        except httpx.HTTPStatusError as e:
+            last_exc = e
+            if e.response.status_code not in (403, 429, 503):
+                raise
+            await asyncio.sleep((2 ** attempt) + random.uniform(0.3, 1.5))
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            last_exc = e
+            await asyncio.sleep((2 ** attempt) + random.uniform(0.2, 0.8))
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Falha ao buscar URL após retries.")
+
+
+async def _fetch_via_jina(url: str) -> str:
+    """Fallback usando r.jina.ai como proxy reader. Retorna markdown."""
+    proxy_url = f"https://r.jina.ai/{url}"
+    async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
+        resp = await client.get(proxy_url, headers={"Accept": "text/markdown", "X-Return-Format": "markdown"})
+        resp.raise_for_status()
+        return resp.text
+
+
+def _parse_search_markdown(md: str, url_busca: str) -> dict:
+    """Parser de fallback que extrai anúncios do markdown do r.jina.ai."""
+    anuncios: list[dict] = []
+
+    # Corta seção "Você pode gostar" para não misturar recomendações com busca real
+    cut = re.search(r"##\s*Você pode gostar", md)
+    md_busca = md[: cut.start()] if cut else md
+
+    # Total: "1 - N de TOTAL resultados"
+    total = 0
+    mt = re.search(r"de\s+(\d+)\s+resultados?", md_busca)
+    if mt:
+        total = int(mt.group(1))
+    md = md_busca
+
+    # Cada anúncio aparece como: "## [Titulo](URL ...)" seguido de bloco até "Adicionar aos favoritos"
+    pattern = re.compile(
+        r'## \[([^\]]+)\]\((https?://[^\s)"]+)[^)]*\)\s*(.*?)Adicionar aos favoritos',
+        re.DOTALL,
+    )
+    seen_ids: set[str] = set()
+    for m in pattern.finditer(md):
+        titulo = m.group(1).strip()
+        link = m.group(2).strip()
+        bloco = m.group(3)
+
+        # Pular top_ads / anúncios patrocinados fora da busca real
+        if "top_ads" in link:
+            continue
+
+        idm = re.search(r"/(\d{8,})(?:\?|$|-)", link)
+        ad_id = idm.group(1) if idm else link
+        if ad_id in seen_ids:
+            continue
+        seen_ids.add(ad_id)
+
+        preco_m = re.search(r"R\$\s*([\d\.\,]+)", bloco)
+        preco = f"R$ {preco_m.group(1)}" if preco_m else None
+
+        # Localização: linha contendo cidade (heurística - antes de data)
+        loc = None
+        for ln in bloco.split("\n"):
+            ln = ln.strip()
+            if not ln or ln.startswith(("![", "*", "Slide", "Ir para", "Entrega", "Pague", "Parcelamento", "em até", "Garantia")):
+                continue
+            if re.match(r"^\d+\s+de\s+\w+", ln) or re.match(r"^\d{2}/\d{2}/\d{4}", ln):
+                continue
+            if "R$" in ln or "###" in ln:
+                continue
+            loc = ln
+            break
+
+        data_m = re.search(r"(\d+\s+de\s+\w+,\s*\d+:\d+|\d{2}/\d{2}/\d{4},?\s*\d+:\d+)", bloco)
+        data = data_m.group(1) if data_m else None
+
+        img_m = re.search(r"!\[[^\]]*\]\((https://img\.olx\.com\.br/[^\)]+)\)", bloco)
+        imagem = img_m.group(1) if img_m else None
+
+        anuncios.append({
+            "id": int(ad_id) if ad_id.isdigit() else ad_id,
+            "titulo": titulo,
+            "preco": preco,
+            "localizacao": loc,
+            "data": data,
+            "url": link,
+            "imagem": imagem,
+            "_fonte": "jina_markdown",
+        })
+
+    return {
+        "total": total or len(anuncios),
+        "pagina": 1,
+        "por_pagina": len(anuncios),
+        "url_busca": url_busca,
+        "anuncios": anuncios,
+        "_fonte": "jina_proxy_fallback",
     }
 
 
@@ -262,13 +452,17 @@ async def olx_buscar_anuncios(params: BuscarAnunciosInput) -> str:
     except ValueError as e:
         return json.dumps({"erro": str(e)}, ensure_ascii=False)
 
+    html = None
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2) as client:
-            resp = await client.get(url, headers=HEADERS)
-            resp.raise_for_status()
-            html = resp.text
-    except Exception as e:
-        return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
+        html = await _fetch_with_evasion(url)
+    except Exception:
+        # Fallback markdown via r.jina.ai
+        try:
+            md = await _fetch_via_jina(url)
+            result = _parse_search_markdown(md, url)
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
 
     try:
         data = _extract_next_data(html)
@@ -324,13 +518,36 @@ async def olx_detalhe_anuncio(params: DetalheAnuncioInput) -> str:
             - propriedades (dict): Atributos específicos da categoria.
             - url (str): URL canônica do anúncio.
     """
+    used_jina = False
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2) as client:
-            resp = await client.get(params.url, headers=HEADERS)
-            resp.raise_for_status()
-            html = resp.text
-    except Exception as e:
-        return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
+        html = await _fetch_with_evasion(params.url)
+    except Exception:
+        try:
+            html = await _fetch_via_jina(params.url)
+            used_jina = True
+        except Exception as e:
+            return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
+
+    # Se vier markdown do jina, parse simples
+    if used_jina:
+        try:
+            titulo_m = re.search(r"^Title:\s*(.+)$", html, re.MULTILINE)
+            preco_m = re.search(r"R\$\s*([\d\.\,]+)", html)
+            desc_m = re.search(r"##\s*Descrição\s*(.+?)(?:##|\Z)", html, re.DOTALL | re.IGNORECASE)
+            loc_m = re.search(r"##\s*Localiza[çc][ãa]o\s*(.+?)(?:##|\Z)", html, re.DOTALL | re.IGNORECASE)
+            imgs = list(dict.fromkeys(re.findall(r"https://img\.olx\.com\.br/[^\s\)]+", html)))
+            result = {
+                "titulo": (titulo_m.group(1).strip() if titulo_m else None),
+                "preco": (f"R$ {preco_m.group(1)}" if preco_m else None),
+                "descricao": (desc_m.group(1).strip()[:2000] if desc_m else None),
+                "localizacao": (loc_m.group(1).strip()[:300] if loc_m else None),
+                "imagens": imgs[:10],
+                "url": params.url,
+                "_fonte": "jina_proxy_fallback",
+            }
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return json.dumps({"erro": f"Falha ao parsear markdown: {e}"}, ensure_ascii=False)
 
     try:
         # Extrai JSON de rastreamento embarcado no dataLayer (mais consistente para detalhes)
@@ -401,10 +618,165 @@ async def olx_detalhe_anuncio(params: DetalheAnuncioInput) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Mercado Livre — busca via scraping (Googlebot UA bypassa micro-landing)
+# ---------------------------------------------------------------------------
+
+ML_BASE = "https://lista.mercadolivre.com.br"
+ML_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+}
+
+
+class BuscarMLInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+
+    query: str = Field(..., min_length=1, max_length=200, description="Termo de busca.")
+    preco_min: Optional[int] = Field(default=None, ge=0, description="Preço mínimo em R$.")
+    preco_max: Optional[int] = Field(default=None, ge=0, description="Preço máximo em R$.")
+    estado: Optional[str] = Field(
+        default=None, min_length=2, max_length=2,
+        description="Sigla estado p/ filtrar resultados após scraping (heurística por texto)."
+    )
+    condicao: Optional[str] = Field(
+        default=None, description="'novo' ou 'usado'. Aplica filtro ITEM_CONDITION."
+    )
+    pagina: int = Field(default=1, ge=1, le=20)
+
+
+def _build_ml_url(p: BuscarMLInput) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", p.query.strip().lower()).strip("-")
+    base = f"{ML_BASE}/{slug}"
+    filters = []
+    if p.preco_min is not None or p.preco_max is not None:
+        lo = p.preco_min if p.preco_min is not None else 0
+        hi = p.preco_max if p.preco_max is not None else 0
+        filters.append(f"_PriceRange_{lo}-{hi if hi else '*'}")
+    if p.condicao:
+        cond = {"novo": "2230284", "usado": "2230581"}.get(p.condicao.lower())
+        if cond:
+            filters.append(f"_ITEM*CONDITION_{cond}")
+    if p.pagina > 1:
+        filters.append(f"_Desde_{(p.pagina - 1) * 50 + 1}")
+    if filters:
+        base += "".join(filters)
+    return base
+
+
+def _parse_ml_html(html: str) -> list[dict]:
+    """Extrai cards de produto do HTML do Mercado Livre."""
+    anuncios = []
+    cards = re.findall(
+        r'<(?:li|div)[^>]*class="[^"]*(?:ui-search-layout__item|poly-card)[^"]*".*?</(?:li|div)>',
+        html, re.DOTALL,
+    )
+    for card in cards:
+        title_m = re.search(
+            r'class="poly-component__title[^"]*"[^>]*>([^<]+)<', card,
+        )
+        if not title_m:
+            continue
+        titulo = title_m.group(1).strip()
+
+        link_m = re.search(
+            r'href="(https?://(?:produto|articulo|www)\.mercado(?:livre|libre)\.com[^"]+)"',
+            card,
+        )
+        link = link_m.group(1).replace("&amp;", "&").split("#")[0] if link_m else None
+
+        preco_int = re.search(r'andes-money-amount__fraction[^>]*>([\d\.]+)<', card)
+        preco_cents = re.search(r'andes-money-amount__cents[^>]*>([\d]+)<', card)
+        preco = None
+        if preco_int:
+            val = preco_int.group(1).replace(".", "")
+            preco = f"R$ {val}" + (f",{preco_cents.group(1)}" if preco_cents else "")
+
+        # Frete
+        frete = "Frete grátis" if "Frete grátis" in card or "frete grátis" in card else None
+
+        # Local (raro nos cards de busca ML; geralmente só na pdp)
+        loc_m = re.search(r'poly-component__location[^>]*>([^<]+)<', card)
+        loc = loc_m.group(1).strip() if loc_m else None
+
+        # Vendedor
+        sel_m = re.search(r'poly-component__seller[^>]*>([^<]+)<', card)
+        seller = sel_m.group(1).strip() if sel_m else None
+
+        # Img
+        img_m = re.search(r'<img[^>]+(?:src|data-src)="(https://http2\.mlstatic\.com/[^"]+)"', card)
+        imagem = img_m.group(1) if img_m else None
+
+        # Atributos (RAM, armazenamento etc) - poly-attributes_list
+        attrs = re.findall(r'poly-attributes_list__item[^>]*>([^<]+)<', card)
+
+        anuncios.append({
+            "titulo": titulo,
+            "preco": preco,
+            "frete": frete,
+            "vendedor": seller,
+            "localizacao": loc,
+            "atributos": [a.strip() for a in attrs if a.strip()],
+            "imagem": imagem,
+            "url": link,
+        })
+    return anuncios
+
+
+@mcp.tool(
+    name="ml_buscar_anuncios",
+    annotations={
+        "title": "Buscar Anúncios no Mercado Livre Brasil",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
+    """Busca anúncios no Mercado Livre Brasil.
+
+    Args:
+        params (BuscarMLInput):
+            - query (str): Termo obrigatório.
+            - preco_min/preco_max (Optional[int]): Faixa de preço em reais.
+            - estado (Optional[str]): Filtro pós-scraping por sigla UF (heurística).
+            - condicao (Optional[str]): 'novo' ou 'usado'.
+            - pagina (int): Página (50 itens por página).
+
+    Returns:
+        str: JSON com lista de anúncios (titulo, preco, frete, atributos, url, imagem).
+    """
+    url = _build_ml_url(params)
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2) as client:
+            resp = await client.get(url, headers=ML_HEADERS)
+            resp.raise_for_status()
+            html = resp.text
+    except Exception as e:
+        return json.dumps({"erro": _handle_http_error(e), "url_busca": url}, ensure_ascii=False)
+
+    anuncios = _parse_ml_html(html)
+
+    # Filtro estado (heurística pelo texto da localização)
+    if params.estado:
+        uf = params.estado.upper()
+        anuncios = [a for a in anuncios if a.get("localizacao") and uf in a["localizacao"].upper()]
+
+    return json.dumps({
+        "total_retornados": len(anuncios),
+        "pagina": params.pagina,
+        "url_busca": url,
+        "anuncios": anuncios,
+    }, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
+    """Entry point para `olx-mcp` console_script e `python -m olx_mcp`."""
     mcp.run()
 
 

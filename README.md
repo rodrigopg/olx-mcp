@@ -1,38 +1,76 @@
 # olx-mcp
 
-MCP server para buscar anúncios públicos da [OLX Brasil](https://www.olx.com.br) via scraping do `__NEXT_DATA__`.
+MCP server para buscar anúncios públicos da [OLX Brasil](https://www.olx.com.br) e do [Mercado Livre Brasil](https://www.mercadolivre.com.br) — com bypass automático de bloqueios anti-bot (rotação de User-Agent, warm-up de cookies, retry com backoff, fallback via `r.jina.ai`, Googlebot UA para o Mercado Livre).
 
-## Instalação
+## Instalação rápida (zero clone, zero venv)
+
+Use [`uv`](https://docs.astral.sh/uv/) — instale uma vez:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Depois rode direto:
+
+```bash
+uvx olx-mcp
+```
+
+Ou via `pip` tradicional:
 
 ```bash
 pip install olx-mcp
+olx-mcp
 ```
 
 ## Configuração no Claude Desktop
 
-Edite `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Cole o bloco abaixo em `claude_desktop_config.json`:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
-    "olx-mcp": {
+    "olx": {
+      "command": "uvx",
+      "args": ["olx-mcp"]
+    }
+  }
+}
+```
+
+Se preferir `pip` em vez de `uvx`:
+
+```json
+{
+  "mcpServers": {
+    "olx": {
       "command": "olx-mcp"
     }
   }
 }
 ```
 
-## Configuração no Claude Code
+Reinicie o Claude Desktop. As ferramentas `olx_buscar_anuncios`, `olx_detalhe_anuncio` e `ml_buscar_anuncios` ficam disponíveis.
+
+## Configuração no Claude Code / Cursor / Continue
+
+**Claude Code (CLI):**
 
 ```bash
-claude mcp add olx-mcp olx-mcp
+claude mcp add olx -- uvx olx-mcp
 ```
+
+**Cursor** (`~/.cursor/mcp.json`) e **Continue** (`~/.continue/config.json`) usam o mesmo bloco JSON do Claude Desktop.
 
 ## Ferramentas
 
 ### `olx_buscar_anuncios`
 
-Busca anúncios com filtros.
+Busca anúncios na OLX com filtros.
 
 | Parâmetro | Tipo | Obrigatório | Descrição |
 |---|---|---|---|
@@ -46,15 +84,30 @@ Busca anúncios com filtros.
 
 ### `olx_detalhe_anuncio`
 
-Retorna detalhes completos de um anúncio pela URL.
+Retorna detalhes completos de um anúncio da OLX pela URL.
 
 | Parâmetro | Tipo | Obrigatório | Descrição |
 |---|---|---|---|
 | `url` | string | Sim | URL completa do anúncio na OLX |
 
+### `ml_buscar_anuncios`
+
+Busca anúncios no Mercado Livre Brasil.
+
+| Parâmetro | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `query` | string | Sim | Termo de busca |
+| `preco_min` | int | Não | Preço mínimo em reais |
+| `preco_max` | int | Não | Preço máximo em reais |
+| `condicao` | string | Não | `novo` \| `usado` |
+| `estado` | string | Não | Sigla UF para filtragem pós-scraping |
+| `pagina` | int | Não | Página (1–20, 50 itens cada) |
+
 ## Exemplos de uso
 
-> Busque notebooks usados em São Paulo por até R$ 2000, ordenados por menor preço.
+> Busque iPhones usados em São Paulo por até R$ 2000, ordenados por menor preço.
+
+> Procure Google Pixel 10 Pro XL na OLX e no Mercado Livre. Monte uma tabela comparativa.
 
 > Me dê os detalhes do anúncio: https://sp.olx.com.br/...
 
@@ -64,12 +117,20 @@ Retorna detalhes completos de um anúncio pela URL.
 git clone https://github.com/rodrigopg/olx-mcp
 cd olx-mcp
 python -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+.venv/bin/pip install -e .
+```
+
+Rodar o servidor localmente:
+
+```bash
+.venv/bin/olx-mcp
+# ou
+.venv/bin/python -m olx_mcp
 ```
 
 ## Aviso
 
-Este servidor faz scraping de dados públicos da OLX Brasil. Use com responsabilidade e respeite os termos de uso do site.
+Este servidor faz scraping de dados públicos da OLX e do Mercado Livre. Use com responsabilidade e respeite os termos de uso de cada site.
 
 ## Licença
 
