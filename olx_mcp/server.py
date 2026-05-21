@@ -5,15 +5,24 @@ Busca anúncios públicos da OLX Brasil via scraping do __NEXT_DATA__.
 
 import asyncio
 import json
+import os
 import random
 import re
 from datetime import datetime
 from typing import Optional
 from enum import Enum
+from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field, ConfigDict
+
+# ---------------------------------------------------------------------------
+# Feature flags via env
+# ---------------------------------------------------------------------------
+
+DISABLE_JINA = os.getenv("OLX_MCP_DISABLE_JINA", "0").lower() in ("1", "true", "yes")
+ALLOWED_OLX_HOSTS = (".olx.com.br",)
 
 # ---------------------------------------------------------------------------
 # Constantes
@@ -171,6 +180,29 @@ class DetalheAnuncioInput(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _validar_url_olx(url: str) -> str:
+    """Garante que a URL é http(s) e aponta para um host *.olx.com.br.
+
+    Previne SSRF — sem isso, um caller poderia forçar requests para
+    169.254.169.254 (metadata cloud), localhost, ou hosts internos.
+    """
+    try:
+        p = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"URL inválida: {e}") from None
+
+    if p.scheme not in ("http", "https"):
+        raise ValueError(f"Esquema não permitido: {p.scheme!r}. Use http(s).")
+    host = (p.hostname or "").lower()
+    if not host:
+        raise ValueError("URL sem hostname.")
+    if not any(host == h.lstrip(".") or host.endswith(h) for h in ALLOWED_OLX_HOSTS):
+        raise ValueError(
+            f"Hostname não permitido: {host!r}. Apenas *.olx.com.br é aceito."
+        )
+    return url
+
 
 def _build_search_url(params: BuscarAnunciosInput) -> str:
     """Monta a URL de busca da OLX com os filtros fornecidos."""
@@ -456,10 +488,13 @@ async def olx_buscar_anuncios(params: BuscarAnunciosInput) -> str:
     try:
         html = await _fetch_with_evasion(url)
     except Exception:
+        if DISABLE_JINA:
+            return json.dumps({"erro": "Erro: acesso negado e fallback Jina desabilitado (OLX_MCP_DISABLE_JINA=1)."}, ensure_ascii=False)
         # Fallback markdown via r.jina.ai
         try:
             md = await _fetch_via_jina(url)
             result = _parse_search_markdown(md, url)
+            result["fonte"] = "olx_jina"
             return json.dumps(result, ensure_ascii=False, indent=2)
         except Exception as e:
             return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
@@ -472,8 +507,11 @@ async def olx_buscar_anuncios(params: BuscarAnunciosInput) -> str:
 
     ads_raw = props.get("ads", [])
     anuncios = [_format_ad_summary(ad) for ad in ads_raw if ad.get("listId")]
+    for a in anuncios:
+        a["fonte"] = "olx"
 
     result = {
+        "fonte": "olx",
         "total": props.get("totalOfAds", 0),
         "pagina": props.get("pageIndex", params.pagina),
         "por_pagina": props.get("pageSize", len(anuncios)),
@@ -518,10 +556,18 @@ async def olx_detalhe_anuncio(params: DetalheAnuncioInput) -> str:
             - propriedades (dict): Atributos específicos da categoria.
             - url (str): URL canônica do anúncio.
     """
+    # SSRF guard: somente *.olx.com.br é permitido
+    try:
+        _validar_url_olx(params.url)
+    except ValueError as e:
+        return json.dumps({"erro": f"Erro de validação: {e}"}, ensure_ascii=False)
+
     used_jina = False
     try:
         html = await _fetch_with_evasion(params.url)
     except Exception:
+        if DISABLE_JINA:
+            return json.dumps({"erro": "Erro: acesso negado e fallback Jina desabilitado (OLX_MCP_DISABLE_JINA=1)."}, ensure_ascii=False)
         try:
             html = await _fetch_via_jina(params.url)
             used_jina = True
@@ -537,13 +583,13 @@ async def olx_detalhe_anuncio(params: DetalheAnuncioInput) -> str:
             loc_m = re.search(r"##\s*Localiza[çc][ãa]o\s*(.+?)(?:##|\Z)", html, re.DOTALL | re.IGNORECASE)
             imgs = list(dict.fromkeys(re.findall(r"https://img\.olx\.com\.br/[^\s\)]+", html)))
             result = {
+                "fonte": "olx_jina",
                 "titulo": (titulo_m.group(1).strip() if titulo_m else None),
                 "preco": (f"R$ {preco_m.group(1)}" if preco_m else None),
                 "descricao": (desc_m.group(1).strip()[:2000] if desc_m else None),
                 "localizacao": (loc_m.group(1).strip()[:300] if loc_m else None),
                 "imagens": imgs[:10],
                 "url": params.url,
-                "_fonte": "jina_proxy_fallback",
             }
             return json.dumps(result, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -610,6 +656,7 @@ async def olx_detalhe_anuncio(params: DetalheAnuncioInput) -> str:
             "imagens": imgs[:10],
             "propriedades": propriedades,
             "url": params.url,
+            "fonte": "olx",
         }
         return json.dumps(result, ensure_ascii=False, indent=2)
 
@@ -645,7 +692,9 @@ class BuscarMLInput(BaseModel):
     pagina: int = Field(default=1, ge=1, le=20)
 
 
-def _build_ml_url(p: BuscarMLInput) -> str:
+def _build_ml_url(p: BuscarMLInput) -> tuple[str, list[str]]:
+    """Monta URL de busca ML. Retorna (url, avisos)."""
+    avisos: list[str] = []
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", p.query.strip().lower()).strip("-")
     base = f"{ML_BASE}/{slug}"
     filters = []
@@ -656,12 +705,16 @@ def _build_ml_url(p: BuscarMLInput) -> str:
     if p.condicao:
         cond = {"novo": "2230284", "usado": "2230581"}.get(p.condicao.lower())
         if cond:
-            filters.append(f"_ITEM*CONDITION_{cond}")
+            # ML não respeita ITEM_CONDITION via slug em /lista — aplicamos
+            # como filtro pós-scraping no título do anúncio.
+            avisos.append(
+                "Filtro 'condicao' aplicado pós-scraping (heurística por título)."
+            )
     if p.pagina > 1:
         filters.append(f"_Desde_{(p.pagina - 1) * 50 + 1}")
     if filters:
         base += "".join(filters)
-    return base
+    return base, avisos
 
 
 def _parse_ml_html(html: str) -> list[dict]:
@@ -747,7 +800,7 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
     Returns:
         str: JSON com lista de anúncios (titulo, preco, frete, atributos, url, imagem).
     """
-    url = _build_ml_url(params)
+    url, avisos = _build_ml_url(params)
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2) as client:
             resp = await client.get(url, headers=ML_HEADERS)
@@ -757,16 +810,34 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
         return json.dumps({"erro": _handle_http_error(e), "url_busca": url}, ensure_ascii=False)
 
     anuncios = _parse_ml_html(html)
+    for a in anuncios:
+        a["fonte"] = "ml"
+
+    # Filtro condicao pós-scraping (ML não aceita via URL no /lista)
+    if params.condicao:
+        cond_low = params.condicao.lower()
+        if cond_low == "usado":
+            anuncios = [a for a in anuncios if "usado" in (a.get("titulo") or "").lower()]
+        elif cond_low == "novo":
+            anuncios = [a for a in anuncios if "usado" not in (a.get("titulo") or "").lower()]
 
     # Filtro estado (heurística pelo texto da localização)
     if params.estado:
         uf = params.estado.upper()
+        antes = len(anuncios)
         anuncios = [a for a in anuncios if a.get("localizacao") and uf in a["localizacao"].upper()]
+        if antes > 0 and not anuncios:
+            avisos.append(
+                "Filtro 'estado' não encontrou localização nos cards (raro no ML); "
+                "considere remover o filtro."
+            )
 
     return json.dumps({
+        "fonte": "ml",
         "total_retornados": len(anuncios),
         "pagina": params.pagina,
         "url_busca": url,
+        "avisos": avisos,
         "anuncios": anuncios,
     }, ensure_ascii=False, indent=2)
 

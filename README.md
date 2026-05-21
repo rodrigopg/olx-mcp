@@ -128,9 +128,17 @@ Rodar o servidor localmente:
 .venv/bin/python -m olx_mcp
 ```
 
-## Aviso
+## Privacidade e considerações
 
-Este servidor faz scraping de dados públicos da OLX e do Mercado Livre. Use com responsabilidade e respeite os termos de uso de cada site.
+- **Fallback via `r.jina.ai`:** quando a OLX bloqueia requisições diretas, o servidor reenvia a URL pelo serviço público [r.jina.ai](https://r.jina.ai) para obter o conteúdo em markdown. Isso significa que **a Jina AI tem acesso ao log das URLs consultadas** durante o fallback. Para desabilitar:
+  ```bash
+  export OLX_MCP_DISABLE_JINA=1
+  ```
+  Com a flag ativa, falhas de bypass retornam erro em vez de consultar terceiros. Toda resposta inclui o campo `fonte` (`olx`, `olx_jina`, `ml`) para que você saiba a origem dos dados.
+
+- **Mercado Livre — Googlebot UA:** o scraper do ML usa `User-Agent: Googlebot/2.1` para contornar a página de challenge anti-bot. ML pode banir IPs que detectem o spoof; use moderadamente.
+
+- **Scraping de dados públicos:** este servidor consulta dados públicos da OLX e do Mercado Livre. Use com responsabilidade e respeite os termos de uso de cada site.
 
 ## Licença
 
