@@ -205,6 +205,32 @@ class TestExtractNextData:
         assert _extract_next_data(html) == {"ok": True}
 
 
+class TestEnvHelpers:
+    def test_env_float_default_when_unset(self, monkeypatch):
+        from olx_mcp.server import _env_float
+
+        monkeypatch.delenv("X_TEST_FLOAT", raising=False)
+        assert _env_float("X_TEST_FLOAT", 1.5, 0.0, 10.0) == 1.5
+
+    def test_env_float_clamps_high(self, monkeypatch):
+        from olx_mcp.server import _env_float
+
+        monkeypatch.setenv("X_TEST_FLOAT", "999")
+        assert _env_float("X_TEST_FLOAT", 1.0, 0.0, 10.0) == 10.0
+
+    def test_env_float_invalid_falls_back(self, monkeypatch):
+        from olx_mcp.server import _env_float
+
+        monkeypatch.setenv("X_TEST_FLOAT", "abc")
+        assert _env_float("X_TEST_FLOAT", 2.0, 0.0, 10.0) == 2.0
+
+    def test_env_int_clamps_low(self, monkeypatch):
+        from olx_mcp.server import _env_int
+
+        monkeypatch.setenv("X_TEST_INT", "-50")
+        assert _env_int("X_TEST_INT", 5, 0, 20) == 0
+
+
 class TestErrorMessages:
     def test_handle_unknown_exception_returns_correlation_id(self):
         from olx_mcp.server import _handle_http_error

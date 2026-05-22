@@ -140,6 +140,18 @@ Rodar o servidor localmente:
 .venv/bin/python -m olx_mcp
 ```
 
+## Variáveis de ambiente
+
+Todos os parâmetros operacionais podem ser ajustados via env (com clamp seguro):
+
+| Variável | Default | Faixa | Descrição |
+|---|---|---|---|
+| `OLX_MCP_REQUEST_TIMEOUT` | `25.0` | 1.0–300.0 | Timeout HTTP em segundos |
+| `OLX_MCP_MAX_RETRIES` | `4` | 0–20 | Tentativas no fetcher OLX (retry + troca de perfil) |
+| `OLX_MCP_WARMUP_PROBABILITY` | `0.7` | 0.0–1.0 | Chance de warm-up da homepage antes do search |
+| `OLX_MCP_DISABLE_JINA` | `0` | `0`/`1` | Desabilita fallback via `r.jina.ai` |
+| `OLX_MCP_LOG_LEVEL` | `WARNING` | `DEBUG`/`INFO`/`WARNING`/`ERROR` | Nível do logger `olx_mcp` |
+
 ## Privacidade e considerações
 
 - **Fallback via `r.jina.ai`:** quando a OLX bloqueia requisições diretas, o servidor reenvia a URL pelo serviço público [r.jina.ai](https://r.jina.ai) para obter o conteúdo em markdown. Isso significa que **a Jina AI tem acesso ao log das URLs consultadas** durante o fallback. Para desabilitar:

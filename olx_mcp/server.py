@@ -19,6 +19,10 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger("olx_mcp")
+_log_level = os.getenv("OLX_MCP_LOG_LEVEL", "WARNING").upper()
+if _log_level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+    logging.basicConfig(level=_log_level)
+    logger.setLevel(_log_level)
 
 # ---------------------------------------------------------------------------
 # Feature flags via env
@@ -93,10 +97,35 @@ def _build_headers(
     return h
 
 
-REQUEST_TIMEOUT = 25.0
+def _env_float(key: str, default: float, lo: float, hi: float) -> float:
+    """Lê env var como float com clamp e fallback silencioso."""
+    raw = os.getenv(key)
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        logger.warning("Env %s inválido (%r), usando default %s", key, raw, default)
+        return default
+    return max(lo, min(hi, v))
+
+
+def _env_int(key: str, default: int, lo: int, hi: int) -> int:
+    raw = os.getenv(key)
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        logger.warning("Env %s inválido (%r), usando default %s", key, raw, default)
+        return default
+    return max(lo, min(hi, v))
+
+
+REQUEST_TIMEOUT = _env_float("OLX_MCP_REQUEST_TIMEOUT", 25.0, 1.0, 300.0)
 HTTP2 = True  # Obrigatório: OLX retorna 403 em HTTP/1.1
-MAX_RETRIES = 4
-WARMUP_PROBABILITY = 0.7  # chance de fazer warm-up homepage antes da busca
+MAX_RETRIES = _env_int("OLX_MCP_MAX_RETRIES", 4, 0, 20)
+WARMUP_PROBABILITY = _env_float("OLX_MCP_WARMUP_PROBABILITY", 0.7, 0.0, 1.0)
 
 ESTADOS = {
     "ac",
