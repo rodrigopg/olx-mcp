@@ -544,6 +544,34 @@ async def _fetch_with_evasion(url: str, referer_override: str | None = None) -> 
     raise RuntimeError("Falha ao buscar URL após retries.")
 
 
+async def _fetch_with_retries(url: str, headers: dict, max_retries: int | None = None) -> str:
+    """Fetch genérico com backoff exponencial + rate limit. Usado por ML / detail."""
+    retries = max_retries if max_retries is not None else MAX_RETRIES
+    last_exc: Exception | None = None
+    async with _RateGate(url):
+        for attempt in range(max(1, retries)):
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2
+                ) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code in (403, 429, 503):
+                        last_exc = httpx.HTTPStatusError(
+                            f"status {resp.status_code}", request=resp.request, response=resp
+                        )
+                        logger.debug("retry %s: status %s p/ %s", attempt, resp.status_code, url)
+                        await asyncio.sleep((2**attempt) + random.uniform(0.2, 1.0))
+                        continue
+                    resp.raise_for_status()
+                    return resp.text
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                await asyncio.sleep((2**attempt) + random.uniform(0.2, 0.8))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Falha ao buscar URL após retries.")
+
+
 async def _fetch_via_jina(url: str) -> str:
     """Fallback usando r.jina.ai como proxy reader. Retorna markdown."""
     proxy_url = f"https://r.jina.ai/{url}"
@@ -1082,13 +1110,7 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
     url, avisos = _build_ml_url(params)
     logger.info("ml_search query=%r condicao=%s pagina=%s", params.query, params.condicao, params.pagina)
     try:
-        async with _RateGate(url):
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2
-            ) as client:
-                resp = await client.get(url, headers=ML_HEADERS)
-                resp.raise_for_status()
-                html = resp.text
+        html = await _fetch_with_retries(url, ML_HEADERS)
     except Exception as e:
         return json.dumps({"erro": _handle_http_error(e), "url_busca": url}, ensure_ascii=False)
 
@@ -1195,13 +1217,7 @@ async def ml_detalhe_anuncio(params: DetalheMLInput) -> str:
 
     logger.info("ml_detail url=%s", params.url)
     try:
-        async with _RateGate(params.url):
-            async with httpx.AsyncClient(
-                follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2
-            ) as client:
-                resp = await client.get(params.url, headers=ML_HEADERS)
-                resp.raise_for_status()
-                html = resp.text
+        html = await _fetch_with_retries(params.url, ML_HEADERS)
     except Exception as e:
         return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
 
