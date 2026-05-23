@@ -103,6 +103,14 @@ Busca anúncios no Mercado Livre Brasil.
 | `estado` | string | Não | Sigla UF para filtragem pós-scraping (ver avisos) |
 | `pagina` | int | Não | Página (1–20, 50 itens cada) |
 
+### `ml_detalhe_anuncio`
+
+Retorna detalhes de um anúncio do Mercado Livre.
+
+| Parâmetro | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `url` | string | Sim | URL completa do anúncio (`*.mercadolivre.com.br` ou `*.mercadolibre.com`) |
+
 ### Diferenças entre as tools
 
 | Aspecto | OLX | Mercado Livre |
@@ -111,7 +119,7 @@ Busca anúncios no Mercado Livre Brasil.
 | Ordenação | `relevance` \| `price` \| `date` | Não suportada (ML não aceita via URL pública) |
 | Filtro `condicao` | N/A | Heurística pós-scraping no título |
 | Filtro `estado` | Nativo na URL | Heurística pós-scraping (frequentemente vazio) |
-| Detalhe de anúncio | `olx_detalhe_anuncio` | Não disponível ainda ([#13](https://github.com/rodrigopg/mcp-brazil-marketplaces/issues/13)) |
+| Detalhe de anúncio | `olx_detalhe_anuncio` | `ml_detalhe_anuncio` |
 
 Os limites de página diferem porque cada site retorna ~50 itens por página por padrão e a profundidade útil é menor no ML (resultados ficam ruins após a página 20).
 
@@ -140,6 +148,28 @@ Rodar o servidor localmente:
 .venv/bin/python -m mcp_brazil_marketplaces
 ```
 
+## Schema unificado de anúncio
+
+Todas as tools devolvem anúncios com os mesmos campos básicos. Campos específicos por fonte são adicionais.
+
+**Comum a OLX e ML:**
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `fonte` | string | `olx` \| `olx_jina` \| `ml` |
+| `id` | int \| string | ID do anúncio |
+| `titulo` | string | Título |
+| `preco` | string | Preço formatado (`R$ X`) |
+| `localizacao` | string \| null | Cidade/bairro/UF (pode ser null no ML) |
+| `data` | string \| null | Data legível (null no ML — não exposta nos cards) |
+| `url` | string | URL canônica do anúncio |
+| `imagem` | string \| null | URL da imagem principal |
+
+**Específicos da OLX:** `categoria`, `bairro`, `profissional`, `entrega_olx`, `propriedades`.
+**Específicos do ML:** `frete`, `vendedor`, `atributos`.
+
+**Envelope da resposta:** `fonte`, `total`, `pagina`, `por_pagina`, `url_busca`, `anuncios`, `avisos` (opcional).
+
 ## Campo `fonte` na resposta
 
 Toda resposta inclui um campo `fonte` no envelope (e em cada anúncio) indicando a origem dos dados:
@@ -164,6 +194,8 @@ Todos os parâmetros operacionais podem ser ajustados via env (com clamp seguro)
 | `MCP_BR_DISABLE_JINA` | `0` | `0`/`1` | Desabilita fallback via `r.jina.ai` |
 | `MCP_BR_LOG_LEVEL` | `WARNING` | `DEBUG`/`INFO`/`WARNING`/`ERROR` | Nível do logger `mcp_brazil_marketplaces` |
 | `MCP_BR_ML_USER_AGENT` | (Googlebot) | qualquer string | Sobrescreve UA usado no Mercado Livre. Use se o spoof de Googlebot for inaceitável — ML geralmente devolverá a página anti-bot e a tool retornará lista vazia. |
+| `MCP_BR_RATE_LIMIT_CONCURRENCY` | `2` | 1–16 | Máx. de requests HTTP simultâneos |
+| `MCP_BR_RATE_LIMIT_MIN_GAP` | `0.5` | 0.0–30.0 | Gap mínimo em segundos entre requests ao mesmo host. `0` desabilita |
 
 ## Privacidade e considerações
 

@@ -137,6 +137,39 @@ class TestFormatters:
         assert s["id"] == 123
         assert s["titulo"] == "Foo"
 
+    def test_format_ad_summary_rejects_malicious_types(self):
+        """Site comprometido injeta listas/dicts onde se esperava string."""
+        ad = {
+            "listId": 1,
+            "subject": ["injection", "list"],  # deveria ser string
+            "price": {"nested": "obj"},  # deveria ser string
+            "properties": "not-a-list",  # deveria ser lista
+            "images": "boom",
+        }
+        s = _format_ad_summary(ad)
+        # campos string viraram None, propriedades vazio, imagem None
+        assert s["titulo"] is None
+        assert s["preco"] == ""
+        assert s["propriedades"] == {}
+        assert s["imagem"] is None
+
+    def test_format_ad_summary_truncates_huge_strings(self):
+        ad = {"listId": 1, "subject": "x" * 10000}
+        s = _format_ad_summary(ad)
+        assert len(s["titulo"]) <= 500
+
+    def test_format_ad_summary_caps_properties_count(self):
+        ad = {
+            "listId": 1,
+            "properties": [{"label": f"k{i}", "value": "v"} for i in range(500)],
+        }
+        s = _format_ad_summary(ad)
+        assert len(s["propriedades"]) <= 80
+
+    def test_format_ad_summary_non_dict_input(self):
+        assert _format_ad_summary("not a dict") == {}
+        assert _format_ad_summary(None) == {}
+
 
 class TestMlParser:
     def test_parses_basic_card(self):
@@ -154,6 +187,11 @@ class TestMlParser:
         assert ads[0]["titulo"] == "iPhone 13 128GB"
         assert ads[0]["preco"] == "R$ 3500,00"
         assert "MLB-123" in ads[0]["url"]
+        # schema unificado E1: ID extraído da URL
+        assert ads[0]["id"] == 123
+        # campos comuns presentes mesmo quando vazios
+        for k in ("titulo", "preco", "localizacao", "data", "url", "imagem"):
+            assert k in ads[0]
 
 
 class TestMarkdownParser:
@@ -300,6 +338,96 @@ def _handle_http_error_wrapper(resp):
 
     err = httpx.HTTPStatusError("boom", request=resp.request, response=resp)
     return _handle_http_error(err)
+
+
+class TestMLDetalheGuard:
+    @pytest.mark.asyncio
+    async def test_rejects_non_ml_host(self):
+        import json as _json
+
+        from mcp_brazil_marketplaces.server import DetalheMLInput, ml_detalhe_anuncio
+
+        r = await ml_detalhe_anuncio(DetalheMLInput(url="http://169.254.169.254/aws/metadata"))
+        d = _json.loads(r)
+        assert "erro" in d
+        assert "não permitido" in d["erro"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_olx_host_in_ml_tool(self):
+        import json as _json
+
+        from mcp_brazil_marketplaces.server import DetalheMLInput, ml_detalhe_anuncio
+
+        r = await ml_detalhe_anuncio(DetalheMLInput(url="https://sp.olx.com.br/foo/bar/1234567"))
+        d = _json.loads(r)
+        assert "erro" in d
+
+
+class TestLogging:
+    def test_logger_name_is_package(self):
+        from mcp_brazil_marketplaces.server import logger
+
+        assert logger.name == "mcp_brazil_marketplaces"
+
+    def test_correlation_id_logged_on_unknown_error(self, caplog):
+        import logging as _l
+
+        from mcp_brazil_marketplaces.server import _handle_http_error
+
+        with caplog.at_level(_l.ERROR, logger="mcp_brazil_marketplaces"):
+            msg = _handle_http_error(RuntimeError("boom"))
+        # ID retornado bate com o logado
+        import re as _re
+
+        m = _re.search(r"id=([a-f0-9]+)", msg)
+        assert m, "resposta deve conter correlation ID"
+        assert m.group(1) in caplog.text
+
+
+class TestRateLimit:
+    @pytest.mark.asyncio
+    async def test_min_gap_enforced(self, monkeypatch):
+        """Duas chamadas sequenciais ao mesmo host respeitam MCP_BR_RATE_LIMIT_MIN_GAP."""
+        import importlib
+
+        monkeypatch.setenv("MCP_BR_RATE_LIMIT_MIN_GAP", "0.3")
+        monkeypatch.setenv("MCP_BR_RATE_LIMIT_CONCURRENCY", "8")
+        import mcp_brazil_marketplaces.server as srv
+
+        importlib.reload(srv)
+        try:
+            import time
+
+            t0 = time.monotonic()
+            await srv._rate_limit("example.com")
+            srv._rate_release()
+            await srv._rate_limit("example.com")
+            srv._rate_release()
+            elapsed = time.monotonic() - t0
+            assert elapsed >= 0.28, f"sem gap: {elapsed:.3f}s"
+        finally:
+            monkeypatch.delenv("MCP_BR_RATE_LIMIT_MIN_GAP", raising=False)
+            monkeypatch.delenv("MCP_BR_RATE_LIMIT_CONCURRENCY", raising=False)
+            importlib.reload(srv)
+
+    @pytest.mark.asyncio
+    async def test_min_gap_zero_disables(self, monkeypatch):
+        import importlib
+        import time
+
+        monkeypatch.setenv("MCP_BR_RATE_LIMIT_MIN_GAP", "0")
+        import mcp_brazil_marketplaces.server as srv
+
+        importlib.reload(srv)
+        try:
+            t0 = time.monotonic()
+            for _ in range(5):
+                await srv._rate_limit("h")
+                srv._rate_release()
+            assert time.monotonic() - t0 < 0.1
+        finally:
+            monkeypatch.delenv("MCP_BR_RATE_LIMIT_MIN_GAP", raising=False)
+            importlib.reload(srv)
 
 
 class TestSchemaConsistency:

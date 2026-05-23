@@ -137,6 +137,61 @@ HTTP2 = True  # Obrigatório: OLX retorna 403 em HTTP/1.1
 MAX_RETRIES = _env_int("MAX_RETRIES", 4, 0, 20)
 WARMUP_PROBABILITY = _env_float("WARMUP_PROBABILITY", 0.7, 0.0, 1.0)
 
+# Rate limit por host: protege IP do operador contra loops do LLM que
+# fariam queimar o IP em <30s. Semáforo limita concorrência;
+# `_HOST_MIN_GAP` impõe atraso mínimo entre chamadas ao mesmo host.
+RATE_LIMIT_CONCURRENCY = _env_int("RATE_LIMIT_CONCURRENCY", 2, 1, 16)
+RATE_LIMIT_MIN_GAP = _env_float("RATE_LIMIT_MIN_GAP", 0.5, 0.0, 30.0)
+
+_rate_semaphore = asyncio.Semaphore(RATE_LIMIT_CONCURRENCY)
+_host_last_request: dict[str, float] = {}
+_host_lock = asyncio.Lock()
+
+
+async def _rate_limit(host: str) -> None:
+    """Adquire slot global + força gap mínimo por host.
+
+    Não é contador de janela deslizante — é um throttle simples
+    suficiente para evitar que um LLM em loop dispare 100 requests/s.
+    Operadores podem desabilitar via MCP_BR_RATE_LIMIT_MIN_GAP=0.
+    """
+    await _rate_semaphore.acquire()
+    if RATE_LIMIT_MIN_GAP <= 0:
+        return
+    async with _host_lock:
+        now = asyncio.get_event_loop().time()
+        prev = _host_last_request.get(host, 0.0)
+        wait = RATE_LIMIT_MIN_GAP - (now - prev)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _host_last_request[host] = asyncio.get_event_loop().time()
+
+
+def _rate_release() -> None:
+    _rate_semaphore.release()
+
+
+class _RateGate:
+    """Context manager async: rate-limit por host com release garantido."""
+
+    def __init__(self, url: str) -> None:
+        self.host = _host_of(url)
+
+    async def __aenter__(self) -> "_RateGate":
+        await _rate_limit(self.host)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        _rate_release()
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
 ESTADOS = {
     "ac",
     "al",
@@ -344,24 +399,84 @@ def _format_timestamp(ts: int) -> str:
         return str(ts)
 
 
+_STR_MAX = 500
+_LIST_MAX = 50
+_PROPS_MAX = 80
+
+
+def _safe_str(v, max_len: int = _STR_MAX) -> str | None:
+    """Coage para string com limite de tamanho; rejeita não-escalares."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v[:max_len]
+    if isinstance(v, (int, float, bool)):
+        return str(v)[:max_len]
+    return None  # dict/list em campo string = payload malicioso, descarta
+
+
+def _safe_dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def _safe_list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
 def _format_ad_summary(ad: dict) -> dict:
-    """Normaliza um anúncio da listagem para campos essenciais."""
-    preco_raw = ad.get("priceValue") or ad.get("price", "")
-    loc = ad.get("locationDetails", {})
+    """Normaliza um anúncio da listagem aplicando coerção defensiva.
+
+    Site comprometido pode injetar JSON malicioso no __NEXT_DATA__
+    (lists onde se espera string, dicts gigantes, etc.). Cada campo
+    passa por `_safe_*` antes de chegar ao LLM (issue #29).
+    """
+    if not isinstance(ad, dict):
+        return {}
+
+    preco_raw = _safe_str(ad.get("priceValue")) or _safe_str(ad.get("price")) or ""
+    loc = _safe_dict(ad.get("locationDetails"))
+    images = _safe_list(ad.get("images"))[:_LIST_MAX]
+    primeira_img = _safe_dict(images[0] if images else {}).get("original")
+
+    propriedades_raw = _safe_list(ad.get("properties"))[:_PROPS_MAX]
+    propriedades = {}
+    for p in propriedades_raw:
+        if not isinstance(p, dict):
+            continue
+        label = _safe_str(p.get("label"), max_len=100)
+        value = _safe_str(p.get("value"))
+        if label and value:
+            propriedades[label] = value
+
+    date_raw = ad.get("date")
+    if isinstance(date_raw, int):
+        data = _format_timestamp(date_raw)
+    elif isinstance(date_raw, str):
+        data = date_raw[:_STR_MAX]
+    else:
+        data = None
+
+    list_id = ad.get("listId")
+    if not isinstance(list_id, (int, str)):
+        list_id = None
+
+    municipality = _safe_str(loc.get("municipality")) or ""
+    uf = _safe_str(loc.get("uf")) or ""
+    localizacao = _safe_str(ad.get("location")) or f"{municipality} - {uf}".strip(" -")
+
     return {
-        "id": ad.get("listId"),
-        "titulo": ad.get("subject") or ad.get("title"),
+        "id": list_id,
+        "titulo": _safe_str(ad.get("subject")) or _safe_str(ad.get("title")),
         "preco": preco_raw,
-        "categoria": ad.get("categoryName") or ad.get("category"),
-        "localizacao": ad.get("location")
-        or f"{loc.get('municipality', '')} - {loc.get('uf', '')}".strip(" -"),
-        "bairro": loc.get("neighbourhood"),
-        "data": _format_timestamp(ad["date"]) if isinstance(ad.get("date"), int) else ad.get("date"),
-        "url": ad.get("friendlyUrl") or ad.get("url"),
-        "imagem": (ad.get("images") or [{}])[0].get("original"),
-        "profissional": ad.get("professionalAd", False),
-        "entrega_olx": ad.get("olxDelivery", {}).get("enabled", False),
-        "propriedades": {p["label"]: p["value"] for p in ad.get("properties", []) if p.get("value")},
+        "categoria": _safe_str(ad.get("categoryName")) or _safe_str(ad.get("category")),
+        "localizacao": localizacao,
+        "bairro": _safe_str(loc.get("neighbourhood")),
+        "data": data,
+        "url": _safe_str(ad.get("friendlyUrl")) or _safe_str(ad.get("url")),
+        "imagem": _safe_str(primeira_img) if primeira_img else None,
+        "profissional": bool(ad.get("professionalAd", False)),
+        "entrega_olx": bool(_safe_dict(ad.get("olxDelivery")).get("enabled", False)),
+        "propriedades": propriedades,
     }
 
 
@@ -377,52 +492,81 @@ async def _fetch_with_evasion(url: str, referer_override: str | None = None) -> 
     """
     last_exc: Exception | None = None
 
-    for attempt in range(MAX_RETRIES):
-        profile = random.choice(BROWSER_PROFILES)
-        cookies = httpx.Cookies()
+    async with _RateGate(url):
+        for attempt in range(MAX_RETRIES):
+            profile = random.choice(BROWSER_PROFILES)
+            cookies = httpx.Cookies()
 
-        try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=REQUEST_TIMEOUT,
-                http2=HTTP2,
-                cookies=cookies,
-            ) as client:
-                # Warm-up: visita homepage para coletar cookies de sessão / anti-bot
-                if attempt == 0 or random.random() < WARMUP_PROBABILITY:
-                    try:
-                        warm_headers = _build_headers(
-                            profile, referer="https://www.google.com/", same_origin=False
-                        )
-                        await client.get(BASE_URL + "/", headers=warm_headers)
-                        await asyncio.sleep(random.uniform(0.4, 1.2))
-                    except Exception:
-                        pass  # warm-up best-effort
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=REQUEST_TIMEOUT,
+                    http2=HTTP2,
+                    cookies=cookies,
+                ) as client:
+                    if attempt == 0 or random.random() < WARMUP_PROBABILITY:
+                        try:
+                            warm_headers = _build_headers(
+                                profile, referer="https://www.google.com/", same_origin=False
+                            )
+                            await client.get(BASE_URL + "/", headers=warm_headers)
+                            await asyncio.sleep(random.uniform(0.4, 1.2))
+                        except Exception:
+                            pass
 
-                ref = referer_override or (
-                    BASE_URL + "/" if random.random() < 0.5 else "https://www.google.com/"
-                )
-                same_origin = ref.startswith(BASE_URL)
-                headers = _build_headers(profile, referer=ref, same_origin=same_origin)
-
-                resp = await client.get(url, headers=headers)
-                if resp.status_code in (403, 429):
-                    last_exc = httpx.HTTPStatusError(
-                        f"status {resp.status_code}", request=resp.request, response=resp
+                    ref = referer_override or (
+                        BASE_URL + "/" if random.random() < 0.5 else "https://www.google.com/"
                     )
-                    await asyncio.sleep((2**attempt) + random.uniform(0.3, 1.5))
-                    continue
-                resp.raise_for_status()
-                return resp.text
-        except httpx.HTTPStatusError as e:
-            last_exc = e
-            if e.response.status_code not in (403, 429, 503):
-                raise
-            await asyncio.sleep((2**attempt) + random.uniform(0.3, 1.5))
-        except (httpx.TimeoutException, httpx.TransportError) as e:
-            last_exc = e
-            await asyncio.sleep((2**attempt) + random.uniform(0.2, 0.8))
+                    same_origin = ref.startswith(BASE_URL)
+                    headers = _build_headers(profile, referer=ref, same_origin=same_origin)
 
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code in (403, 429):
+                        last_exc = httpx.HTTPStatusError(
+                            f"status {resp.status_code}", request=resp.request, response=resp
+                        )
+                        logger.debug("retry %s: status %s p/ %s", attempt, resp.status_code, url)
+                        await asyncio.sleep((2**attempt) + random.uniform(0.3, 1.5))
+                        continue
+                    resp.raise_for_status()
+                    return resp.text
+            except httpx.HTTPStatusError as e:
+                last_exc = e
+                if e.response.status_code not in (403, 429, 503):
+                    raise
+                await asyncio.sleep((2**attempt) + random.uniform(0.3, 1.5))
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                await asyncio.sleep((2**attempt) + random.uniform(0.2, 0.8))
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Falha ao buscar URL após retries.")
+
+
+async def _fetch_with_retries(url: str, headers: dict, max_retries: int | None = None) -> str:
+    """Fetch genérico com backoff exponencial + rate limit. Usado por ML / detail."""
+    retries = max_retries if max_retries is not None else MAX_RETRIES
+    last_exc: Exception | None = None
+    async with _RateGate(url):
+        for attempt in range(max(1, retries)):
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2
+                ) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code in (403, 429, 503):
+                        last_exc = httpx.HTTPStatusError(
+                            f"status {resp.status_code}", request=resp.request, response=resp
+                        )
+                        logger.debug("retry %s: status %s p/ %s", attempt, resp.status_code, url)
+                        await asyncio.sleep((2**attempt) + random.uniform(0.2, 1.0))
+                        continue
+                    resp.raise_for_status()
+                    return resp.text
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_exc = e
+                await asyncio.sleep((2**attempt) + random.uniform(0.2, 0.8))
     if last_exc:
         raise last_exc
     raise RuntimeError("Falha ao buscar URL após retries.")
@@ -431,10 +575,15 @@ async def _fetch_with_evasion(url: str, referer_override: str | None = None) -> 
 async def _fetch_via_jina(url: str) -> str:
     """Fallback usando r.jina.ai como proxy reader. Retorna markdown."""
     proxy_url = f"https://r.jina.ai/{url}"
-    async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
-        resp = await client.get(proxy_url, headers={"Accept": "text/markdown", "X-Return-Format": "markdown"})
-        resp.raise_for_status()
-        return resp.text
+    logger.info("jina_fallback url=%s", url)
+    async with _RateGate(proxy_url):
+        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.get(
+                proxy_url,
+                headers={"Accept": "text/markdown", "X-Return-Format": "markdown"},
+            )
+            resp.raise_for_status()
+            return resp.text
 
 
 def _parse_search_markdown(md: str, url_busca: str) -> dict:
@@ -592,6 +741,13 @@ async def olx_buscar_anuncios(params: BuscarAnunciosInput) -> str:
     except ValueError as e:
         return json.dumps({"erro": str(e)}, ensure_ascii=False)
 
+    logger.info(
+        "olx_search query=%r estado=%s categoria=%s pagina=%s",
+        params.query,
+        params.estado,
+        params.categoria,
+        params.pagina,
+    )
     html = None
     try:
         html = await _fetch_with_evasion(url)
@@ -901,16 +1057,27 @@ def _parse_ml_html(html: str) -> list[dict]:
         # Atributos (RAM, armazenamento etc) - poly-attributes_list
         attrs = re.findall(r"poly-attributes_list__item[^>]*>([^<]+)<", card)
 
+        # ID extraído do MLB-<digits> na URL — campo comum a OLX/ML
+        ad_id: str | int | None = None
+        if link:
+            m_id = re.search(r"MLB-?(\d+)", link)
+            if m_id:
+                ad_id = int(m_id.group(1))
+
         anuncios.append(
             {
+                # campos comuns (schema unificado)
+                "id": ad_id,
                 "titulo": titulo,
                 "preco": preco,
+                "localizacao": loc,
+                "data": None,  # ML não expõe data nos cards
+                "url": link,
+                "imagem": imagem,
+                # campos específicos ML
                 "frete": frete,
                 "vendedor": seller,
-                "localizacao": loc,
                 "atributos": [a.strip() for a in attrs if a.strip()],
-                "imagem": imagem,
-                "url": link,
             }
         )
     return anuncios
@@ -941,11 +1108,9 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
         str: JSON com lista de anúncios (titulo, preco, frete, atributos, url, imagem).
     """
     url, avisos = _build_ml_url(params)
+    logger.info("ml_search query=%r condicao=%s pagina=%s", params.query, params.condicao, params.pagina)
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2) as client:
-            resp = await client.get(url, headers=ML_HEADERS)
-            resp.raise_for_status()
-            html = resp.text
+        html = await _fetch_with_retries(url, ML_HEADERS)
     except Exception as e:
         return json.dumps({"erro": _handle_http_error(e), "url_busca": url}, ensure_ascii=False)
 
@@ -975,8 +1140,9 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
     return json.dumps(
         {
             "fonte": "ml",
-            "total_retornados": len(anuncios),
+            "total": len(anuncios),  # ML não expõe totalOfAds; reflete itens retornados
             "pagina": params.pagina,
+            "por_pagina": len(anuncios),
             "url_busca": url,
             "avisos": avisos,
             "anuncios": anuncios,
@@ -984,6 +1150,123 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
         ensure_ascii=False,
         indent=2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Mercado Livre — detalhe
+# ---------------------------------------------------------------------------
+
+_ALLOWED_ML_HOSTS = (
+    ".mercadolivre.com.br",
+    ".mercadolibre.com",
+)
+
+
+def _validar_url_ml(url: str) -> str:
+    """SSRF guard para Mercado Livre."""
+    try:
+        p = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"URL inválida: {e}") from None
+    if p.scheme not in ("http", "https"):
+        raise ValueError(f"Esquema não permitido: {p.scheme!r}. Use http(s).")
+    host = (p.hostname or "").lower()
+    if not host:
+        raise ValueError("URL sem hostname.")
+    if not any(host.endswith(h) for h in _ALLOWED_ML_HOSTS):
+        raise ValueError(f"Hostname não permitido: {host!r}. Apenas *.mercadolivre.com.br/mercadolibre.com.")
+    return url
+
+
+class DetalheMLInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    url: str = Field(
+        ...,
+        min_length=20,
+        description=(
+            "URL completa do anúncio no Mercado Livre. Ex: 'https://produto.mercadolivre.com.br/MLB-1234-...'"
+        ),
+    )
+
+
+@mcp.tool(
+    name="ml_detalhe_anuncio",
+    annotations={
+        "title": "Obter Detalhes de Anúncio no Mercado Livre",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ml_detalhe_anuncio(params: DetalheMLInput) -> str:
+    """Obtém detalhes de um anúncio do Mercado Livre a partir da URL.
+
+    Args:
+        params (DetalheMLInput):
+            - url (str): URL completa do anúncio.
+
+    Returns:
+        str: JSON com campos comuns (id, titulo, preco, url, fonte) + descricao,
+        imagens, vendedor. Em caso de erro: {"erro": "..."}.
+    """
+    try:
+        _validar_url_ml(params.url)
+    except ValueError as e:
+        return json.dumps({"erro": f"Erro de validação: {e}"}, ensure_ascii=False)
+
+    logger.info("ml_detail url=%s", params.url)
+    try:
+        html = await _fetch_with_retries(params.url, ML_HEADERS)
+    except Exception as e:
+        return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
+
+    # ML retorna ~600KB; limitar contra OOM (#20)
+    if len(html) > MAX_HTML_BYTES:
+        html = html[:MAX_HTML_BYTES]
+
+    try:
+        # Title via meta og:title ou h1.ui-pdp-title
+        title_m = re.search(r'class="ui-pdp-title"[^>]*>([^<]{1,500})<', html)
+        titulo = title_m.group(1).strip() if title_m else None
+
+        # Preço: primeiro andes-money-amount__fraction
+        price_m = re.search(r'class="andes-money-amount__fraction"[^>]*>([\d\.]{1,12})<', html)
+        preco = f"R$ {price_m.group(1)}" if price_m else None
+
+        # ID do MLB
+        id_m = re.search(r'"itemId":"MLB(\d+)"', html) or re.search(r"MLB-?(\d+)", params.url)
+        ad_id = int(id_m.group(1)) if id_m else None
+
+        # Vendedor
+        seller_m = re.search(r'"nickname":"([^"]{1,80})"', html)
+        vendedor = seller_m.group(1) if seller_m else None
+
+        # Descrição (plainText)
+        desc_m = re.search(r'"plainText":"((?:[^"\\]|\\.){30,2000})"', html)
+        descricao = None
+        if desc_m:
+            descricao = desc_m.group(1).encode().decode("unicode_escape", errors="ignore")[:2000]
+
+        # Imagens
+        imgs_raw = re.findall(r'(https://http2\.mlstatic\.com/D_NQ_NP[^"\s]+\.(?:jpg|webp))', html)
+        imagens = list(dict.fromkeys(imgs_raw))[:10]
+
+        result = {
+            "fonte": "ml",
+            "id": ad_id,
+            "titulo": titulo,
+            "preco": preco,
+            "vendedor": vendedor,
+            "descricao": descricao,
+            "imagens": imagens,
+            "url": params.url,
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except Exception as e:
+        err_id = uuid.uuid4().hex[:8]
+        logger.exception("Falha ao parsear ML detalhe [%s]: %s", err_id, e)
+        return json.dumps({"erro": f"Falha ao parsear anúncio ML (id={err_id})."}, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
