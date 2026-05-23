@@ -340,6 +340,29 @@ def _handle_http_error_wrapper(resp):
     return _handle_http_error(err)
 
 
+class TestMLDetalheGuard:
+    @pytest.mark.asyncio
+    async def test_rejects_non_ml_host(self):
+        import json as _json
+
+        from mcp_brazil_marketplaces.server import DetalheMLInput, ml_detalhe_anuncio
+
+        r = await ml_detalhe_anuncio(DetalheMLInput(url="http://169.254.169.254/aws/metadata"))
+        d = _json.loads(r)
+        assert "erro" in d
+        assert "não permitido" in d["erro"].lower()
+
+    @pytest.mark.asyncio
+    async def test_rejects_olx_host_in_ml_tool(self):
+        import json as _json
+
+        from mcp_brazil_marketplaces.server import DetalheMLInput, ml_detalhe_anuncio
+
+        r = await ml_detalhe_anuncio(DetalheMLInput(url="https://sp.olx.com.br/foo/bar/1234567"))
+        d = _json.loads(r)
+        assert "erro" in d
+
+
 class TestLogging:
     def test_logger_name_is_package(self):
         from mcp_brazil_marketplaces.server import logger

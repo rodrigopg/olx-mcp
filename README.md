@@ -103,6 +103,14 @@ Busca anúncios no Mercado Livre Brasil.
 | `estado` | string | Não | Sigla UF para filtragem pós-scraping (ver avisos) |
 | `pagina` | int | Não | Página (1–20, 50 itens cada) |
 
+### `ml_detalhe_anuncio`
+
+Retorna detalhes de um anúncio do Mercado Livre.
+
+| Parâmetro | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `url` | string | Sim | URL completa do anúncio (`*.mercadolivre.com.br` ou `*.mercadolibre.com`) |
+
 ### Diferenças entre as tools
 
 | Aspecto | OLX | Mercado Livre |
@@ -111,7 +119,7 @@ Busca anúncios no Mercado Livre Brasil.
 | Ordenação | `relevance` \| `price` \| `date` | Não suportada (ML não aceita via URL pública) |
 | Filtro `condicao` | N/A | Heurística pós-scraping no título |
 | Filtro `estado` | Nativo na URL | Heurística pós-scraping (frequentemente vazio) |
-| Detalhe de anúncio | `olx_detalhe_anuncio` | Não disponível ainda ([#13](https://github.com/rodrigopg/mcp-brazil-marketplaces/issues/13)) |
+| Detalhe de anúncio | `olx_detalhe_anuncio` | `ml_detalhe_anuncio` |
 
 Os limites de página diferem porque cada site retorna ~50 itens por página por padrão e a profundidade útil é menor no ML (resultados ficam ruins após a página 20).
 

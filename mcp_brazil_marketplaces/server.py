@@ -1131,6 +1131,129 @@ async def ml_buscar_anuncios(params: BuscarMLInput) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Mercado Livre — detalhe
+# ---------------------------------------------------------------------------
+
+_ALLOWED_ML_HOSTS = (
+    ".mercadolivre.com.br",
+    ".mercadolibre.com",
+)
+
+
+def _validar_url_ml(url: str) -> str:
+    """SSRF guard para Mercado Livre."""
+    try:
+        p = urlparse(url)
+    except Exception as e:
+        raise ValueError(f"URL inválida: {e}") from None
+    if p.scheme not in ("http", "https"):
+        raise ValueError(f"Esquema não permitido: {p.scheme!r}. Use http(s).")
+    host = (p.hostname or "").lower()
+    if not host:
+        raise ValueError("URL sem hostname.")
+    if not any(host.endswith(h) for h in _ALLOWED_ML_HOSTS):
+        raise ValueError(f"Hostname não permitido: {host!r}. Apenas *.mercadolivre.com.br/mercadolibre.com.")
+    return url
+
+
+class DetalheMLInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra="forbid")
+    url: str = Field(
+        ...,
+        min_length=20,
+        description=(
+            "URL completa do anúncio no Mercado Livre. Ex: 'https://produto.mercadolivre.com.br/MLB-1234-...'"
+        ),
+    )
+
+
+@mcp.tool(
+    name="ml_detalhe_anuncio",
+    annotations={
+        "title": "Obter Detalhes de Anúncio no Mercado Livre",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def ml_detalhe_anuncio(params: DetalheMLInput) -> str:
+    """Obtém detalhes de um anúncio do Mercado Livre a partir da URL.
+
+    Args:
+        params (DetalheMLInput):
+            - url (str): URL completa do anúncio.
+
+    Returns:
+        str: JSON com campos comuns (id, titulo, preco, url, fonte) + descricao,
+        imagens, vendedor. Em caso de erro: {"erro": "..."}.
+    """
+    try:
+        _validar_url_ml(params.url)
+    except ValueError as e:
+        return json.dumps({"erro": f"Erro de validação: {e}"}, ensure_ascii=False)
+
+    logger.info("ml_detail url=%s", params.url)
+    try:
+        async with _RateGate(params.url):
+            async with httpx.AsyncClient(
+                follow_redirects=True, timeout=REQUEST_TIMEOUT, http2=HTTP2
+            ) as client:
+                resp = await client.get(params.url, headers=ML_HEADERS)
+                resp.raise_for_status()
+                html = resp.text
+    except Exception as e:
+        return json.dumps({"erro": _handle_http_error(e)}, ensure_ascii=False)
+
+    # ML retorna ~600KB; limitar contra OOM (#20)
+    if len(html) > MAX_HTML_BYTES:
+        html = html[:MAX_HTML_BYTES]
+
+    try:
+        # Title via meta og:title ou h1.ui-pdp-title
+        title_m = re.search(r'class="ui-pdp-title"[^>]*>([^<]{1,500})<', html)
+        titulo = title_m.group(1).strip() if title_m else None
+
+        # Preço: primeiro andes-money-amount__fraction
+        price_m = re.search(r'class="andes-money-amount__fraction"[^>]*>([\d\.]{1,12})<', html)
+        preco = f"R$ {price_m.group(1)}" if price_m else None
+
+        # ID do MLB
+        id_m = re.search(r'"itemId":"MLB(\d+)"', html) or re.search(r"MLB-?(\d+)", params.url)
+        ad_id = int(id_m.group(1)) if id_m else None
+
+        # Vendedor
+        seller_m = re.search(r'"nickname":"([^"]{1,80})"', html)
+        vendedor = seller_m.group(1) if seller_m else None
+
+        # Descrição (plainText)
+        desc_m = re.search(r'"plainText":"((?:[^"\\]|\\.){30,2000})"', html)
+        descricao = None
+        if desc_m:
+            descricao = desc_m.group(1).encode().decode("unicode_escape", errors="ignore")[:2000]
+
+        # Imagens
+        imgs_raw = re.findall(r'(https://http2\.mlstatic\.com/D_NQ_NP[^"\s]+\.(?:jpg|webp))', html)
+        imagens = list(dict.fromkeys(imgs_raw))[:10]
+
+        result = {
+            "fonte": "ml",
+            "id": ad_id,
+            "titulo": titulo,
+            "preco": preco,
+            "vendedor": vendedor,
+            "descricao": descricao,
+            "imagens": imagens,
+            "url": params.url,
+        }
+        return json.dumps(result, ensure_ascii=False, indent=2)
+    except Exception as e:
+        err_id = uuid.uuid4().hex[:8]
+        logger.exception("Falha ao parsear ML detalhe [%s]: %s", err_id, e)
+        return json.dumps({"erro": f"Falha ao parsear anúncio ML (id={err_id})."}, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
