@@ -137,6 +137,39 @@ class TestFormatters:
         assert s["id"] == 123
         assert s["titulo"] == "Foo"
 
+    def test_format_ad_summary_rejects_malicious_types(self):
+        """Site comprometido injeta listas/dicts onde se esperava string."""
+        ad = {
+            "listId": 1,
+            "subject": ["injection", "list"],  # deveria ser string
+            "price": {"nested": "obj"},  # deveria ser string
+            "properties": "not-a-list",  # deveria ser lista
+            "images": "boom",
+        }
+        s = _format_ad_summary(ad)
+        # campos string viraram None, propriedades vazio, imagem None
+        assert s["titulo"] is None
+        assert s["preco"] == ""
+        assert s["propriedades"] == {}
+        assert s["imagem"] is None
+
+    def test_format_ad_summary_truncates_huge_strings(self):
+        ad = {"listId": 1, "subject": "x" * 10000}
+        s = _format_ad_summary(ad)
+        assert len(s["titulo"]) <= 500
+
+    def test_format_ad_summary_caps_properties_count(self):
+        ad = {
+            "listId": 1,
+            "properties": [{"label": f"k{i}", "value": "v"} for i in range(500)],
+        }
+        s = _format_ad_summary(ad)
+        assert len(s["propriedades"]) <= 80
+
+    def test_format_ad_summary_non_dict_input(self):
+        assert _format_ad_summary("not a dict") == {}
+        assert _format_ad_summary(None) == {}
+
 
 class TestMlParser:
     def test_parses_basic_card(self):

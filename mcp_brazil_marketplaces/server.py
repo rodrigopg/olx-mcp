@@ -399,24 +399,84 @@ def _format_timestamp(ts: int) -> str:
         return str(ts)
 
 
+_STR_MAX = 500
+_LIST_MAX = 50
+_PROPS_MAX = 80
+
+
+def _safe_str(v, max_len: int = _STR_MAX) -> str | None:
+    """Coage para string com limite de tamanho; rejeita não-escalares."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v[:max_len]
+    if isinstance(v, (int, float, bool)):
+        return str(v)[:max_len]
+    return None  # dict/list em campo string = payload malicioso, descarta
+
+
+def _safe_dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def _safe_list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
 def _format_ad_summary(ad: dict) -> dict:
-    """Normaliza um anúncio da listagem para campos essenciais."""
-    preco_raw = ad.get("priceValue") or ad.get("price", "")
-    loc = ad.get("locationDetails", {})
+    """Normaliza um anúncio da listagem aplicando coerção defensiva.
+
+    Site comprometido pode injetar JSON malicioso no __NEXT_DATA__
+    (lists onde se espera string, dicts gigantes, etc.). Cada campo
+    passa por `_safe_*` antes de chegar ao LLM (issue #29).
+    """
+    if not isinstance(ad, dict):
+        return {}
+
+    preco_raw = _safe_str(ad.get("priceValue")) or _safe_str(ad.get("price")) or ""
+    loc = _safe_dict(ad.get("locationDetails"))
+    images = _safe_list(ad.get("images"))[:_LIST_MAX]
+    primeira_img = _safe_dict(images[0] if images else {}).get("original")
+
+    propriedades_raw = _safe_list(ad.get("properties"))[:_PROPS_MAX]
+    propriedades = {}
+    for p in propriedades_raw:
+        if not isinstance(p, dict):
+            continue
+        label = _safe_str(p.get("label"), max_len=100)
+        value = _safe_str(p.get("value"))
+        if label and value:
+            propriedades[label] = value
+
+    date_raw = ad.get("date")
+    if isinstance(date_raw, int):
+        data = _format_timestamp(date_raw)
+    elif isinstance(date_raw, str):
+        data = date_raw[:_STR_MAX]
+    else:
+        data = None
+
+    list_id = ad.get("listId")
+    if not isinstance(list_id, (int, str)):
+        list_id = None
+
+    municipality = _safe_str(loc.get("municipality")) or ""
+    uf = _safe_str(loc.get("uf")) or ""
+    localizacao = _safe_str(ad.get("location")) or f"{municipality} - {uf}".strip(" -")
+
     return {
-        "id": ad.get("listId"),
-        "titulo": ad.get("subject") or ad.get("title"),
+        "id": list_id,
+        "titulo": _safe_str(ad.get("subject")) or _safe_str(ad.get("title")),
         "preco": preco_raw,
-        "categoria": ad.get("categoryName") or ad.get("category"),
-        "localizacao": ad.get("location")
-        or f"{loc.get('municipality', '')} - {loc.get('uf', '')}".strip(" -"),
-        "bairro": loc.get("neighbourhood"),
-        "data": _format_timestamp(ad["date"]) if isinstance(ad.get("date"), int) else ad.get("date"),
-        "url": ad.get("friendlyUrl") or ad.get("url"),
-        "imagem": (ad.get("images") or [{}])[0].get("original"),
-        "profissional": ad.get("professionalAd", False),
-        "entrega_olx": ad.get("olxDelivery", {}).get("enabled", False),
-        "propriedades": {p["label"]: p["value"] for p in ad.get("properties", []) if p.get("value")},
+        "categoria": _safe_str(ad.get("categoryName")) or _safe_str(ad.get("category")),
+        "localizacao": localizacao,
+        "bairro": _safe_str(loc.get("neighbourhood")),
+        "data": data,
+        "url": _safe_str(ad.get("friendlyUrl")) or _safe_str(ad.get("url")),
+        "imagem": _safe_str(primeira_img) if primeira_img else None,
+        "profissional": bool(ad.get("professionalAd", False)),
+        "entrega_olx": bool(_safe_dict(ad.get("olxDelivery")).get("enabled", False)),
+        "propriedades": propriedades,
     }
 
 
