@@ -1,5 +1,12 @@
 # mcp-brazil-marketplaces
 
+[![PyPI version](https://img.shields.io/pypi/v/mcp-brazil-marketplaces.svg)](https://pypi.org/project/mcp-brazil-marketplaces/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mcp-brazil-marketplaces.svg)](https://pypi.org/project/mcp-brazil-marketplaces/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/mcp-brazil-marketplaces.svg)](https://pypi.org/project/mcp-brazil-marketplaces/)
+[![CI](https://github.com/rodrigopg/mcp-brazil-marketplaces/actions/workflows/ci.yml/badge.svg)](https://github.com/rodrigopg/mcp-brazil-marketplaces/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/rodrigopg/mcp-brazil-marketplaces/blob/main/LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 MCP server para buscar anúncios públicos da [OLX Brasil](https://www.olx.com.br) e do [Mercado Livre Brasil](https://www.mercadolivre.com.br) — com bypass automático de bloqueios anti-bot (rotação de User-Agent, warm-up de cookies, retry com backoff, fallback via `r.jina.ai`, Googlebot UA para o Mercado Livre).
 
 ## Instalação rápida (zero clone, zero venv)
@@ -208,6 +215,21 @@ Todos os parâmetros operacionais podem ser ajustados via env (com clamp seguro)
 - **Mercado Livre — Googlebot UA:** o scraper do ML usa `User-Agent: Googlebot/2.1` para contornar a página de challenge anti-bot. ML pode banir IPs que detectem o spoof; use moderadamente. Para desabilitar o spoof, defina `MCP_BR_ML_USER_AGENT` com um UA real (esperado: ML retornará challenge e a tool dará lista vazia).
 
 - **Scraping de dados públicos:** este servidor consulta dados públicos da OLX e do Mercado Livre. Use com responsabilidade e respeite os termos de uso de cada site.
+
+## Release
+
+Releases para o PyPI são automatizados via [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC) — sem tokens armazenados. Workflow `.github/workflows/release.yml` dispara em tags `v*`.
+
+Para cortar uma release:
+
+```bash
+# bump em pyproject.toml + olx_mcp/__init__.py
+git commit -am "release v0.4.0"
+git tag v0.4.0
+git push && git push --tags
+```
+
+O GitHub Actions builda wheel/sdist, valida que a tag bate com `pyproject.toml`, e publica via OIDC no PyPI.
 
 ## Licença
 
