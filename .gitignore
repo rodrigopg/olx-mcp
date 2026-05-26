@@ -8,5 +8,6 @@ build/
 .eggs/
 .pytest_cache/
 .ruff_cache/
-.claude/
+.claude/*
+!.claude/context/
 .DS_Store
